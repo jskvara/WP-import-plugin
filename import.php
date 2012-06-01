@@ -9,142 +9,74 @@ Author URI: http://www.jakubskvara.cz/
 License: GPLv2 or later
 */
 
-register_activation_hook(__FILE__, "install");
-function install() {
-}
+error_reporting(E_ALL);
 
-register_deactivation_hook(__FILE__, "uninstall");
-function uninstall() {
-}
+$skvaraPlugin = new SkvaraPlugin();
+$skvaraPlugin->bootstrap();
 
-$skvImporter = new SkvImporter();
-add_action("admin_menu", array($skvImporter, "addAdminMenu"));
-
-require_once __DIR__ ."/String.php";
+require_once dirname(__FILE__) ."/Importer.php";
 
 /**
- * Importer class
+ * General controller class
  */
-class SkvImporter {
+class SkvaraPlugin {
+	const URL = "http://www.skvara.cz/investice/index.html";
+
+	public function bootstrap() {
+		register_activation_hook(__FILE__, array($this, "install"));
+		register_deactivation_hook(__FILE__, array($this, "uninstall"));
+
+		add_action("admin_menu", array($this, "addAdminMenu"));
+
+		if(!wp_next_scheduled("importer_hook")) {
+			wp_schedule_event(current_time("timestamp"), "daily", "importer_hook");
+		}
+		add_action("importer_hook", array($this, "importHook"));
+	}
+
+	protected function install() {}
+	protected function uninstall() {}
 	
 	public function addAdminMenu() {
 		add_options_page(__("Skvara importer", "skv-importer"), __("Skvara importer", "skv-importer"), 
 			"manage_options", "skv-importer", array($this, "pluginOptions"));
 	}
 
-	public function pluginOptions() {
-		// if (!current_user_can("manage_options"))  {
-		// 	wp_die( __("You do not have sufficient permissions to access this page.") );
-		// }
+	protected function importHook() {
+		try {
+			$importer = new Importer();
+			$imported = $importer->import(self::URL);
 
-		$url = "http://www.skvara.cz/skvara-financni-poradenstvi/investice/imesicnik022012~.html";
-		$this->getArticle($url);
-
-		include_once __DIR__ ."/templates/index.php";
-	}
-
-	protected function getArticle($url) {
-		$oldSetting = libxml_use_internal_errors(true);
-		libxml_clear_errors();
-
-		$dom = new DOMDocument();
-		$dom->loadHtmlFile($url);
-
-		$xpath = new DOMXPath($dom);
-
-		$titleQuery = "/html/body/table/tr[3]/td[2]/table/tr/td[2]/table/tr/td/table//span";
-		$titleNodes = $xpath->query($titleQuery);
-		$title = $titleNodes->item(0)->nodeValue;
-		echo "Title: ". $title;
-
-		$contentQuery = "/html/body/table/tr[3]/td[2]/table/tr/td[2]/table/tr/td/table/tr[3]/td";
-		$contentNodes = $xpath->query($contentQuery);
-		$contentNode = $contentNodes->item(0);//->nodeValue;
-		$children = $contentNode->childNodes; 
-		foreach ($children as $child) { 
-			$content .= $child->ownerDocument->saveXML( $child ); 
-		}
-		$content = $this->tidy($content);
-		// echo "Content: ". $content;
-		echo "Content: ". $content;
-		
-		libxml_clear_errors();
-		libxml_use_internal_errors($oldSetting);
-
-		$this->insertPost($title, $content, "", "");
-	}
-
-	protected function insertPost($title, $content, $author, $category/*, $date*/) {
-		$name = String::webalize($title);
-		$post = array(
-			'comment_status' => 'closed',
-			'ping_status' => 'open',
-			'post_author' => $author,
-			'post_category' => array($category),
-			'post_content' => $content,
-//			'post_date' => [ Y-m-d H:i:s ],
-			'post_name' => $name, // slug
-			'post_status' => 'publish',
-			'post_title' => $title,
-			'post_type' => 'post',
-		);
-		var_export($post);
-		// $return = wp_insert_post($post, $wp_error);
-
-		// if (is_wp_error($return)) {
-		// 	throw new Exception($return->get_error_message());
-		// }
-	}
-
-	protected function tidy($string) {
-		if (!extension_loaded('tidy')) {
-			return $string;
-		}
-
-		$tidy = new tidy();
-		$string = $tidy->repairString($string);
-
-		return $tidy;
-	}
-
-	//"http://www.skvara.cz/skvara-financni-poradenstvi/investice/index.html"
-	protected function getContent($url) {
-		$oldSetting = libxml_use_internal_errors(true);
-		libxml_clear_errors();
-	
-		$dom = new DOMDocument();
-		$dom->loadHtmlFile($url);
-
-		$xpath = new DOMXPath($dom);
-		$articles = $xpath->query('/html/body/table/tr[3]/td[2]/table/tr/td[2]/table/tr/td/table');
-	
-		$actual = "";
-		$i = 0;
-		foreach($articles as $article) {
-			// title
-			$title = $article->childNodes->item(1)->nodeValue;
-			if( mb_strlen($title) > 40 ) {
-				$title = mb_substr($title, 0, 40, "utf-8")."...";
+			$title = "skvaraPlugin - import";
+			if (empty($imported)) {
+				$message = "No new articles.";
+			} else {
+				$message = implode("\n", $imported);
 			}
-		
-			// href
-			$div = $article->childNodes->item(2)->firstChild->childNodes;
-			$href = $div->item((max($div->length-2, 0)))->firstChild->getAttribute("href");
-			$actual .= "<li><a href=\"http://www.skvara.cz".$href."\">- ".$title."</a></li>\n";
+		} catch (Exception $e) {
+			$title = "skvaraPlugin - import failed";
+			$message = $e->getMessage();
 		}
-		libxml_clear_errors();
-		libxml_use_internal_errors($oldSetting);
+
+		wp_mail("jskvara@gmail.com", $title, $message);
+	}
+
+	public function pluginOptions() {
+		if (!current_user_can("manage_options")) {
+			// __(text, domain)
+			wp_die(__("You do not have sufficient permissions to access this page."));
+		}
+
+		try {
+			if (isset($_POST["submit"])) {
+				$tpl["imported"] = array();
+				$importer = new Importer();
+				$tpl["imported"] = $importer->import(self::URL);
+			}
+		} catch (Exception $e) {
+			$tpl["exception"] = $e;
+		}
+
+		include_once dirname(__FILE__) ."/templates/index.php";
 	}
 }
-
-
-// __(text, domain)
-
-// if(!wp_next_scheduled("my_task_hook")) {
-// 	wp_schedule_event( time(), "hourly", "my_task_hook" );
-// }
-// add_action("my_task_hook", "my_task_function");
-
-// function my_task_function() {
-// 	wp_mail( "your@email.com", "Automatic email", "Automatic scheduled email from WordPress.");
-// }
